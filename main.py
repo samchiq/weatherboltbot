@@ -1,10 +1,10 @@
 import os
 import logging
 import requests
-from flask import Flask, request
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, CommandHandler, MessageHandler, InlineQueryHandler, ContextTypes, filters
 from dotenv import load_dotenv
+import asyncio
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -21,9 +21,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# Flask приложение для webhook
-app = Flask(__name__)
 
 # ==================== МОДУЛЬ ПОГОДЫ ====================
 
@@ -186,7 +183,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 input_message_content=InputTextMessageContent(
                     message_text=full_message
                 ),
-                thumb_url="https://via.placeholder.com/64/4A90E2/FFFFFF?text=🔩"
+                thumbnail_url="https://via.placeholder.com/64/4A90E2/FFFFFF?text=🔩"
             )
         ]
     
@@ -200,8 +197,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== НАСТРОЙКА БОТА ====================
 
-def create_bot_application():
-    """Создание и настройка приложения бота"""
+async def main():
+    """Главная функция запуска бота"""
+    # Создание приложения
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Регистрация обработчиков
@@ -210,47 +208,16 @@ def create_bot_application():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     
-    return application
+    logger.info(f"Запуск бота на порту {PORT}")
+    logger.info(f"Ожидание webhook запросов на /webhook")
+    
+    # Запуск webhook сервера (webhook настраивается вручную через API Telegram)
+    await application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="webhook"
+    )
 
-
-# ==================== FLASK WEBHOOK ====================
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Обработчик webhook запросов от Telegram"""
-    json_data = request.get_json()
-    update = Update.de_json(json_data, bot_app.bot)
-    bot_app.update_queue.put(update)
-    return 'OK'
-
-
-@app.route('/')
-def index():
-    """Главная страница для проверки работы сервиса"""
-    return '🔩 Метеоболт бот работает!'
-
-
-@app.route('/health')
-def health():
-    """Health check endpoint"""
-    return 'OK'
-
-
-# ==================== ЗАПУСК ====================
-
-# Создание экземпляра бота
-bot_app = create_bot_application()
-
-async def setup_webhook():
-    """Настройка webhook"""
-    await bot_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    logger.info(f"Webhook установлен: {WEBHOOK_URL}/webhook")
 
 if __name__ == '__main__':
-    # Настройка webhook при запуске
-    import asyncio
-    asyncio.run(setup_webhook())
-    
-    # Запуск Flask сервера для обработки webhook
-    logger.info(f"Запуск бота на порту {PORT}")
-    app.run(host='0.0.0.0', port=PORT)
+    asyncio.run(main())
