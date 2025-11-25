@@ -4,7 +4,6 @@ import requests
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, CommandHandler, MessageHandler, InlineQueryHandler, ContextTypes, filters
 from dotenv import load_dotenv
-import asyncio
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -13,6 +12,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+# Render автоматически назначает PORT, но если нет — используем 10000
 PORT = int(os.getenv('PORT', 10000))
 
 # Настройка логирования
@@ -45,11 +45,11 @@ def get_weather(city):
             'city': data['name'],
             'temp': data['main']['temp'],
             'description': data['weather'][0]['description'],
-            'rain': data.get('rain', {}).get('1h', 0),  # Дождь за последний час
-            'snow': data.get('snow', {}).get('1h', 0),  # Снег за последний час
-            'clouds': data['clouds']['all'],  # Облачность в процентах
-            'visibility': data.get('visibility', 10000),  # Видимость в метрах
-            'wind_speed': data['wind']['speed']  # Скорость ветра м/с
+            'rain': data.get('rain', {}).get('1h', 0),
+            'snow': data.get('snow', {}).get('1h', 0),
+            'clouds': data['clouds']['all'],
+            'visibility': data.get('visibility', 10000),
+            'wind_speed': data['wind']['speed']
         }
         
         return weather_info, None
@@ -71,31 +71,26 @@ def generate_bolt_message(weather_data):
     """Генерация сообщения о состоянии болта на основе погоды"""
     messages = []
     
-    # Проверка дождя
     if weather_data['rain'] > 0:
         messages.append("БОЛТ МОКРЫЙ - ИДЕТ ДОЖДЬ")
     else:
         messages.append("БОЛТ СУХОЙ - ДОЖДЯ НЕТ")
     
-    # Проверка облачности (тень)
     if weather_data['clouds'] < 30:
         messages.append("БОЛТ ОТБРАСЫВАЕТ ТЕНЬ - ЯСНО")
     else:
         messages.append("БОЛТ НЕ ОТБРАСЫВАЕТ ТЕНЬ - ОБЛАЧНО")
     
-    # Проверка тумана
     if weather_data['visibility'] < 1000:
         messages.append("БОЛТА НЕ ВИДНО - ТУМАН")
     else:
         messages.append("БОЛТ ВИДНО - ТУМАНА НЕТ")
     
-    # Проверка ветра
     if weather_data['wind_speed'] > 5:
         messages.append("БОЛТ КАЧАЕТСЯ - ВЕТРЕННО")
     else:
         messages.append("БОЛТ НЕ КАЧАЕТСЯ - НЕ ВЕТРЕННО")
     
-    # Проверка снега
     if weather_data['snow'] > 0:
         messages.append("БОЛТ В БЕЛОМ - СНЕГ")
     
@@ -134,14 +129,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений в ЛС"""
     city = update.message.text.strip()
     
-    # Получение погоды
     weather_data, error = get_weather(city)
     
     if error:
         await update.message.reply_text(f"❌ {error}")
         return
     
-    # Формирование и отправка ответа
     message = generate_detailed_message(weather_data)
     await update.message.reply_text(message)
 
@@ -153,13 +146,11 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not query:
         return
     
-    # Получение погоды
     weather_data, error = get_weather(query)
     
     results = []
     
     if error:
-        # Возврат результата с ошибкой
         results = [
             InlineQueryResultArticle(
                 id="error",
@@ -171,7 +162,6 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ]
     else:
-        # Формирование сообщения о болте
         bolt_message = generate_bolt_message(weather_data)
         full_message = f"🔩 Метеоболт: {weather_data['city']}\n\n{bolt_message}"
         
@@ -208,15 +198,21 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     
+    # Проверка обязательных переменных перед запуском
+    if not WEBHOOK_URL:
+        logger.critical("ОШИБКА: Не установлена переменная окружения WEBHOOK_URL")
+        return
+
     logger.info(f"Запуск бота на порту {PORT}")
-    logger.info(f"Ожидание webhook запросов на /webhook")
+    logger.info(f"Вебхук URL настроен на: {WEBHOOK_URL}/webhook")
     
-    # Запуск webhook сервера (webhook настраивается вручную через API Telegram)
+    # Запуск webhook сервера
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
-        webhook_url=None,  # Отключаем автоматическую установку webhook
+        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Передаем полный URL для регистрации в Telegram
+        webhook_url=f"{WEBHOOK_URL}/webhook", 
         drop_pending_updates=True
     )
 
