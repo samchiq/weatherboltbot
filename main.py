@@ -1,6 +1,8 @@
 import os
 import logging
 import requests
+import asyncio
+from aiohttp import web
 from telegram import Update, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import Application, CommandHandler, MessageHandler, InlineQueryHandler, ContextTypes, filters
 from dotenv import load_dotenv
@@ -12,7 +14,6 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 WEATHER_API_KEY = os.getenv('WEATHER_API_KEY')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL')
-# Render автоматически назначает PORT, но если нет — используем 10000
 PORT = int(os.getenv('PORT', 10000))
 
 # Настройка логирования
@@ -25,22 +26,30 @@ logger = logging.getLogger(__name__)
 # ==================== МОДУЛЬ ПОГОДЫ ====================
 
 def get_weather(city):
-    """Получение данных о погоде через OpenWeatherMap API"""
-    try:
-        url = f"https://api.openweathermap.org/data/2.5/weather"
+    """Получение данных о погоде с поддержкой повторных попыток"""
+    
+    def fetch_data(query):
+        url = "https://api.openweathermap.org/data/2.5/weather"
         params = {
-            'q': city,
+            'q': query,
             'appid': WEATHER_API_KEY,
             'units': 'metric',
             'lang': 'ru'
         }
-        
-        response = requests.get(url, params=params, timeout=10)
+        return requests.get(url, params=params, timeout=10)
+
+    try:
+        # 1. Попытка поиска "как есть"
+        response = fetch_data(city)
+
+        # 2. Если 404 и есть дефис, пробуем заменить на пробел (Тель-Авив -> Тель Авив)
+        if response.status_code == 404 and '-' in city:
+            city_variant = city.replace('-', ' ')
+            response = fetch_data(city_variant)
+
         response.raise_for_status()
-        
         data = response.json()
         
-        # Извлечение нужных данных
         weather_info = {
             'city': data['name'],
             'temp': data['main']['temp'],
@@ -51,12 +60,11 @@ def get_weather(city):
             'visibility': data.get('visibility', 10000),
             'wind_speed': data['wind']['speed']
         }
-        
         return weather_info, None
         
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
-            return None, "Город не найден. Проверьте правильность написания."
+            return None, "Город не найден. Попробуйте написать название на английском."
         return None, "Ошибка при получении данных о погоде."
     except requests.exceptions.RequestException:
         return None, "Не удалось связаться с сервисом погоды."
@@ -64,158 +72,138 @@ def get_weather(city):
         logger.error(f"Unexpected error: {e}")
         return None, "Произошла неожиданная ошибка."
 
-
 # ==================== МОДУЛЬ СООБЩЕНИЙ ====================
 
 def generate_bolt_message(weather_data):
-    """Генерация сообщения о состоянии болта на основе погоды"""
+    """Генерация сообщения о состоянии болта"""
     messages = []
+    if weather_data['rain'] > 0: messages.append("БОЛТ МОКРЫЙ - ИДЕТ ДОЖДЬ")
+    else: messages.append("БОЛТ СУХОЙ - ДОЖДЯ НЕТ")
     
-    if weather_data['rain'] > 0:
-        messages.append("БОЛТ МОКРЫЙ - ИДЕТ ДОЖДЬ")
-    else:
-        messages.append("БОЛТ СУХОЙ - ДОЖДЯ НЕТ")
+    if weather_data['clouds'] < 30: messages.append("БОЛТ ОТБРАСЫВАЕТ ТЕНЬ - ЯСНО")
+    else: messages.append("БОЛТ НЕ ОТБРАСЫВАЕТ ТЕНЬ - ОБЛАЧНО")
     
-    if weather_data['clouds'] < 30:
-        messages.append("БОЛТ ОТБРАСЫВАЕТ ТЕНЬ - ЯСНО")
-    else:
-        messages.append("БОЛТ НЕ ОТБРАСЫВАЕТ ТЕНЬ - ОБЛАЧНО")
+    if weather_data['visibility'] < 1000: messages.append("БОЛТА НЕ ВИДНО - ТУМАН")
+    else: messages.append("БОЛТ ВИДНО - ТУМАНА НЕТ")
     
-    if weather_data['visibility'] < 1000:
-        messages.append("БОЛТА НЕ ВИДНО - ТУМАН")
-    else:
-        messages.append("БОЛТ ВИДНО - ТУМАНА НЕТ")
+    if weather_data['wind_speed'] > 5: messages.append("БОЛТ КАЧАЕТСЯ - ВЕТРЕННО")
+    else: messages.append("БОЛТ НЕ КАЧАЕТСЯ - НЕ ВЕТРЕННО")
     
-    if weather_data['wind_speed'] > 5:
-        messages.append("БОЛТ КАЧАЕТСЯ - ВЕТРЕННО")
-    else:
-        messages.append("БОЛТ НЕ КАЧАЕТСЯ - НЕ ВЕТРЕННО")
-    
-    if weather_data['snow'] > 0:
-        messages.append("БОЛТ В БЕЛОМ - СНЕГ")
+    if weather_data['snow'] > 0: messages.append("БОЛТ В БЕЛОМ - СНЕГ")
     
     return "\n".join(messages)
 
-
 def generate_detailed_message(weather_data):
-    """Генерация детального сообщения для ЛС"""
     bolt_status = generate_bolt_message(weather_data)
-    
-    detailed = f"🌡 Погода в городе {weather_data['city']}\n"
-    detailed += f"Температура: {weather_data['temp']:.1f}°C\n"
-    detailed += f"Описание: {weather_data['description']}\n\n"
-    detailed += "⚙️ Состояние метеоболта:\n"
-    detailed += bolt_status
-    
-    return detailed
-
+    return (f"🌡 Погода в городе {weather_data['city']}\n"
+            f"Температура: {weather_data['temp']:.1f}°C\n"
+            f"Описание: {weather_data['description']}\n\n"
+            f"⚙️ Состояние метеоболта:\n{bolt_status}")
 
 # ==================== ОБРАБОТЧИКИ БОТА ====================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
-    welcome_text = (
-        "🔩 Привет! Я бот-метеоболт!\n\n"
-        "Я показываю погоду через состояние волшебного болта.\n\n"
-        "📍 Как пользоваться:\n"
-        "• Напиши мне название города в ЛС\n"
-        "• Или используй inline режим: @your_bot_name Город\n\n"
-        "Попробуй написать: Москва"
-    )
-    await update.message.reply_text(welcome_text)
-
+    await update.message.reply_text("🔩 Привет! Я бот-метеоболт! Напиши мне город.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений в ЛС"""
     city = update.message.text.strip()
-    
     weather_data, error = get_weather(city)
-    
     if error:
         await update.message.reply_text(f"❌ {error}")
         return
-    
-    message = generate_detailed_message(weather_data)
-    await update.message.reply_text(message)
-
+    await update.message.reply_text(generate_detailed_message(weather_data))
 
 async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик inline запросов"""
     query = update.inline_query.query.strip()
-    
-    if not query:
-        return
+    if not query: return
     
     weather_data, error = get_weather(query)
-    
     results = []
     
     if error:
-        results = [
-            InlineQueryResultArticle(
-                id="error",
-                title=f"❌ {error}",
-                description="Попробуйте другой город",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"❌ {error}"
-                )
-            )
-        ]
+        results = [InlineQueryResultArticle(
+            id="error", title=f"❌ {error}", 
+            input_message_content=InputTextMessageContent(message_text=f"❌ {error}")
+        )]
     else:
         bolt_message = generate_bolt_message(weather_data)
         full_message = f"🔩 Метеоболт: {weather_data['city']}\n\n{bolt_message}"
-        
-        results = [
-            InlineQueryResultArticle(
-                id=weather_data['city'],
-                title=f"🔩 {weather_data['city']}",
-                description=f"{weather_data['temp']:.1f}°C, {weather_data['description']}",
-                input_message_content=InputTextMessageContent(
-                    message_text=full_message
-                ),
-                thumbnail_url="https://via.placeholder.com/64/4A90E2/FFFFFF?text=🔩"
-            )
-        ]
-    
+        results = [InlineQueryResultArticle(
+            id=weather_data['city'],
+            title=f"🔩 {weather_data['city']}",
+            description=f"{weather_data['temp']:.1f}°C, {weather_data['description']}",
+            input_message_content=InputTextMessageContent(message_text=full_message)
+        )]
     await update.inline_query.answer(results, cache_time=300)
 
-
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик ошибок"""
     logger.error(f"Update {update} caused error {context.error}")
 
+# ==================== ВЕБ-СЕРВЕР (AIOHTTP) ====================
 
-# ==================== НАСТРОЙКА БОТА ====================
+async def health_check_handler(request):
+    """Обработчик для UptimeRobot"""
+    return web.Response(text="Bot is alive!", status=200)
 
-def main():
-    """Главная функция запуска бота"""
-    # Создание приложения
+async def telegram_webhook_handler(request):
+    """Обработчик входящих вебхуков от Telegram"""
+    try:
+        # Получаем бота из приложения
+        bot_app = request.app['bot_app']
+        # Читаем JSON
+        data = await request.json()
+        # Превращаем JSON в объект Update
+        update = Update.de_json(data, bot_app.bot)
+        # Отправляем update в очередь бота
+        await bot_app.process_update(update)
+        return web.Response()
+    except Exception as e:
+        logger.error(f"Error in webhook handler: {e}")
+        return web.Response(status=500)
+
+# ==================== ЗАПУСК ====================
+
+async def main():
+    # 1. Настройка БОТА
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(InlineQueryHandler(inline_query))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
-    
-    # Проверка обязательных переменных перед запуском
+
     if not WEBHOOK_URL:
-        logger.critical("ОШИБКА: Не установлена переменная окружения WEBHOOK_URL")
+        logger.critical("WEBHOOK_URL не установлен!")
         return
 
-    logger.info(f"Запуск бота на порту {PORT}")
-    logger.info(f"Вебхук URL настроен на: {WEBHOOK_URL}/webhook")
+    # Инициализация бота
+    await application.initialize()
+    await application.start()
     
-    # Запуск webhook сервера
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="webhook",
-        # ВАЖНОЕ ИСПРАВЛЕНИЕ: Передаем полный URL для регистрации в Telegram
-        webhook_url=f"{WEBHOOK_URL}/webhook", 
-        drop_pending_updates=True
-    )
+    # Установка вебхука (сообщаем Телеграму, куда слать данные)
+    webhook_path = f"{WEBHOOK_URL}/webhook"
+    logger.info(f"Setting webhook to {webhook_path}")
+    await application.bot.set_webhook(url=webhook_path, drop_pending_updates=True)
 
+    # 2. Настройка ВЕБ-СЕРВЕРА
+    app = web.Application()
+    app['bot_app'] = application # Сохраняем ссылку на бота внутри веб-приложения
+    
+    # Регистрируем маршруты
+    app.router.add_get('/health', health_check_handler)   # Для UptimeRobot
+    app.router.add_post('/webhook', telegram_webhook_handler) # Для Telegram
+
+    # Запуск сервера
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    logger.info(f"Сервер запущен на порту {PORT}")
+    await site.start()
+
+    # Бесконечный цикл ожидания (чтобы программа не закрылась)
+    await asyncio.Event().wait()
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
