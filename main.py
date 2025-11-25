@@ -197,7 +197,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== НАСТРОЙКА БОТА ====================
 
-async def main():
+def main():
     """Главная функция запуска бота"""
     # Создание приложения
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -212,7 +212,7 @@ async def main():
     logger.info(f"Ожидание webhook запросов на /webhook")
     
     # Запуск webhook сервера (webhook настраивается вручную через API Telegram)
-    await application.run_webhook(
+    application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook"
@@ -220,4 +220,4 @@ async def main():
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
