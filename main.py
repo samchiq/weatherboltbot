@@ -215,7 +215,9 @@ def main():
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path="webhook"
+        url_path="webhook",
+        webhook_url=None,  # Отключаем автоматическую установку webhook
+        drop_pending_updates=True
     )
 
 
